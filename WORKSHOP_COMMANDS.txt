@@ -1,0 +1,171 @@
+HOPPER WORKSHOP — FINAL FOLLOW-ALONG COMMANDS
+================================================
+
+Replace:
+  <NetID>          with your Mason NetID
+  <compute-node>   with the output of `hostname`
+  <APP_PASSWORD>   with the MariaDB password you choose
+
+IMPORTANT: MariaDB and Streamlit must run on the SAME Hopper compute node.
+
+1) LOG IN
+ssh <NetID>@hopper.orc.gmu.edu
+
+2) GET A COMPUTE NODE
+salloc --partition=interactive --time=02:00:00 --cpus-per-task=2 --mem=4G
+hostname
+
+3) LOAD SOFTWARE
+module load gnu12
+module load mariadb/12.1.1-jw
+module load python/3.12.1-33
+
+4) FIRST-TIME MARIADB SETUP
+Run only if ~/my_database has not already been initialized:
+
+mkdir -p $HOME/my_database
+$MARIADB_ROOT/scripts/mariadb-install-db --datadir=$HOME/my_database
+
+5) START / RESTART MARIADB
+To stop an existing instance:
+mariadb --socket=$HOME/my_database/mysql.sock -e "SHUTDOWN;"
+
+Start:
+mariadbd-safe \
+  --datadir=$HOME/my_database \
+  --socket=$HOME/my_database/mysql.sock \
+  > $HOME/my_database/mariadb-safe.out 2>&1 &
+
+sleep 5
+ls -l $HOME/my_database/mysql.sock
+mariadb --socket=$HOME/my_database/mysql.sock -e "SELECT VERSION();"
+
+6) WORKSHOP DIRECTORY
+cd "/home/<NetID>/Workshop-Managing Data On Hopper"
+
+7) PYTHON ENVIRONMENT
+python -m venv ~/venvs/streamlit-demo
+source ~/venvs/streamlit-demo/bin/activate
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+
+8) DOWNLOAD EARTHQUAKE DATA
+python download_earthquakes.py
+
+9) CREATE DATABASE + TABLE
+mariadb --socket=$HOME/my_database/mysql.sock < 01_schema.sql
+
+10) LOAD THE CSV
+Edit 02_load.sql and replace <NetID> in the CSV path.
+
+mariadb \
+  --socket=$HOME/my_database/mysql.sock \
+  --local-infile=1 \
+  < 02_load.sql
+
+Verify:
+mariadb --socket=$HOME/my_database/mysql.sock \
+  -e "SELECT COUNT(*) FROM research_db.earthquakes;"
+
+mariadb --socket=$HOME/my_database/mysql.sock \
+  -e "DESCRIBE research_db.earthquakes;"
+
+11) FINAL LOAD DATA SQL USED IN THE DEMO
+
+USE research_db;
+
+LOAD DATA LOCAL INFILE '/home/<NetID>/Workshop-Managing Data On Hopper/earthquakes.csv'
+INTO TABLE earthquakes
+FIELDS TERMINATED BY ','
+OPTIONALLY ENCLOSED BY '"'
+LINES TERMINATED BY '\n'
+IGNORE 1 LINES
+(@time, @latitude, @longitude, @depth, @mag, @magType, @nst, @gap, @dmin,
+ @rms, @net, @id, @updated, @place, @type, @horizontalError, @depthError,
+ @magError, @magNst, @status, @locationSource, @magSource)
+SET
+    id         = @id,
+    event_time = STR_TO_DATE(LEFT(@time, 19), '%Y-%m-%dT%H:%i:%s'),
+    latitude   = @latitude,
+    longitude  = @longitude,
+    depth_km   = NULLIF(@depth, ''),
+    magnitude  = NULLIF(@mag, ''),
+    mag_type   = @magType,
+    place      = @place,
+    event_type = @type,
+    net        = @net,
+    status     = @status,
+    updated    = STR_TO_DATE(LEFT(@updated, 19), '%Y-%m-%dT%H:%i:%s');
+
+12) CREATE STREAMLIT DATABASE USER
+mariadb --socket=$HOME/my_database/mysql.sock
+
+Then inside MariaDB:
+
+CREATE USER IF NOT EXISTS 'streamlit_user'@'localhost'
+IDENTIFIED BY '<APP_PASSWORD>';
+
+ALTER USER 'streamlit_user'@'localhost'
+IDENTIFIED BY '<APP_PASSWORD>';
+
+GRANT SELECT, INSERT ON research_db.* TO 'streamlit_user'@'localhost';
+FLUSH PRIVILEGES;
+SHOW GRANTS FOR 'streamlit_user'@'localhost';
+exit;
+
+13) SET CONNECTION VARIABLES
+export MARIADB_SOCKET=$HOME/my_database/mysql.sock
+export MARIADB_DB=research_db
+export MARIADB_USER=streamlit_user
+export MARIADB_PASSWORD='<APP_PASSWORD>'
+
+14) OPTIONAL FALLBACK CSV LOADER
+python load_csv.py earthquakes.csv
+
+15) DEMO QUERIES
+mariadb --socket=$HOME/my_database/mysql.sock < 03_queries.sql
+
+16) START STREAMLIT
+hostname
+ps -ef | grep '[m]ariadbd'
+ls -l $HOME/my_database/mysql.sock
+
+streamlit run app.py \
+  --server.port 8501 \
+  --server.address 0.0.0.0 \
+  --server.headless true
+
+If 8501 is busy, use 8502.
+
+17) FROM A NEW LAPTOP TERMINAL / POWERSHELL
+For 8501:
+ssh -N -L 8501:<compute-node>:8501 <NetID>@hopper.orc.gmu.edu
+
+Open:
+http://localhost:8501
+
+For 8502:
+ssh -N -L 8502:<compute-node>:8502 <NetID>@hopper.orc.gmu.edu
+
+Open:
+http://localhost:8502
+
+18) CLEAN SHUTDOWN
+Stop Streamlit with Ctrl+C.
+
+mariadb --socket=$HOME/my_database/mysql.sock -e "SHUTDOWN;"
+
+TROUBLESHOOTING
+---------------
+Socket missing:
+  MariaDB is not running on this node.
+
+Access denied:
+  Check MARIADB_USER/MARIADB_PASSWORD and SHOW GRANTS.
+
+Unknown mag_type/event_type/net/status:
+  Re-run 01_schema.sql and reload with 02_load.sql.
+
+Port 8501 unavailable:
+  ps -fu $USER | grep '[s]treamlit'
+  Stop your old process or use 8502.
